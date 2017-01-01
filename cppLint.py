@@ -1532,6 +1532,8 @@ def remove_comment(parser_string):
     :param parser_string: 需要处理的文本
     :return:  删除注释完毕后的文本
     """
+
+    # 删除多行的时候,会在中间插入对应行数的换行,方便统计准备行数
     while True:
         search = mul_line_comment_regex.search(parser_string)
         if search is None:
@@ -1539,7 +1541,12 @@ def remove_comment(parser_string):
 
         comment_begin_pos = search.start(0)
         comment_end_pos = search.end(0)
-        parser_string = parser_string[0:comment_begin_pos] + parser_string[comment_end_pos:]
+        line_break_count = parser_string.count("\n", comment_begin_pos, comment_end_pos)
+        replace_str = ""
+        for x in range(0, line_break_count):
+            replace_str += "\n"
+
+        parser_string = parser_string[0:comment_begin_pos] + replace_str + parser_string[comment_end_pos:]
 
     while True:
         search = one_line_comment_regex.search(parser_string)
