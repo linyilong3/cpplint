@@ -1,17 +1,18 @@
 import re
 import os.path
+import logging
 # todo: 后续把所有match_*的代码都改成match_and_check_*的形式，可以比较好做递归下降来进行语法分析
 # todo: python在进行正则表达式匹配有时候会卡死
 
 # 正则表达式模板字符串
 template_regex_str = r"(?P<template><[\w<>:\s\d,\*&]+>)?"       # 匹配<>里面的东西
 # 指针或者引用的表达式
-pointer_or_ref_regex_str = r"(\*|&|\s)+"
+pointer_or_ref_regex_str = r"((\s*(\*|&)+\s*)|\s+)"
 # 类型的正则表达式
 type_regex_str = r"(?P<type_name>(\w+::)?(\w+))" + template_regex_str + pointer_or_ref_regex_str
 
 # 变量名称的正则表达式
-var_name_str = r"(?P<var_name>(\w|\[|\]|->|\.|<|>|\*)+)"
+var_name_str = r"(?P<var_name>(\w+))"
 
 # 类起始位置的正则表达式
 class_regex = re.compile(r"class\s+(\w+\s+)?(?P<class_name>\w+)")
@@ -26,10 +27,13 @@ function_regex = re.compile(r"((virtual|static|inline)\s*)?(\w+::)?(\w+)(<[\w<>:
 destroy_declare_regex = re.compile(r"(virtual\s+)?~\w+\((void)?\)")
 
 # 变量声明正则表达式
-var_regex = re.compile(r"(?:static\s+)?(?:const\s+)?"+type_regex_str + var_name_str)
+var_regex = re.compile(r"(?:static\s+)?(?:const\s+)?" + type_regex_str + var_name_str)
+
+#类静态变量初始化
+class_static_init_regex = re.compile(type_regex_str +r" +\w+::" + var_name_str)
 
 # 友元函数声明
-friend_declare_regex = re.compile("friend\s+.+\(")
+friend_declare_regex = re.compile(r"friend")
 # 多行的注释
 mul_line_comment_regex = re.compile(r"/\*(.|\n)*?(\*/)")
 # 单行的注释
@@ -49,11 +53,11 @@ switch_stat_regex = re.compile(r"switch\s*\((.|\s)+?\)\s*\{")
 # return 表达式
 return_stat_regex = re.compile(r"return (.|\s)+?;")
 # function调用表达式
-function_call_regex = re.compile(r"\w+\(")
+function_call_regex = re.compile(r"(\w+::)?\w+\((.|\s)*?\);")
 # if表达式
 if_stat_regex = re.compile(r"if\s*\(")
 # 赋值表达式
-assign_regex = re.compile(var_name_str+r"=")
+assign_start_regex = re.compile(var_name_str + r"=")
 # 类成员函数表达式
 class_member_impl_begin_regex = re.compile(type_regex_str + r"\w+::\w+\(")
 # delete 语句
@@ -65,7 +69,7 @@ define_start_regex = re.compile(r"#define")
 # typedef 语句
 typedef_stat_regex = re.compile(r"typedef")
 # enum语句
-enum_stat_regex = re.compile(r"enum\s*\w*\s*\{(.|\s)*?\}\s*\w+;")
+enum_stat_regex = re.compile(r"enum\s*\w*\s*\{(.|\s)*?\}\s*\w*;")
 # #include "..."
 self_include_regex = re.compile(r'#include\s+"(?P<include_name>(.)+)?"')
 # #include <...>
@@ -83,6 +87,14 @@ destroy_impl_start_regex = re.compile(r"\w+::~\w+\(")
 # 构造函数实现的正则表达式
 construct_impl_start_regex = re.compile(r"\w+::\w+\(")
 
+# CIT_BEGIN_ENUM
+cit_begin_enum_regex = re.compile(r"CIT_BEGIN_ENUM\((\w+)\)(\s|.)+?CIT_END_ENUM")
+# 参数间隔的正则表达式
+param_regex = re.compile(r"\s*(?:const\s+)?((\w+::)?(\w+))(<[\w<>:\s\d,]+>)?(\s|\*|&)+\w+,")
+# emit 语句
+emit_stat_regex = re.compile(r"emit\s+.+?;")
+# Q_PROPERTY
+qproperty_stat_regex = re.compile(r"Q_PROPERTY\((.| )+?\)")
 # 错误信息
 # 类相关规则
 CLASS_NAME_MUST_CIT_BEGIN = r"类名称必须以cit开头"
@@ -125,11 +137,6 @@ def remove_begin_space_and_newline(parser_string):
         break
 
     return parser_string[begin_pos:]
-
-
-def get_next_token_pos(parser_string, token):
-    # todo: 把这个函数去掉
-    return parser_string.find(token)
 
 
 def find_token_pair_by_pos(parser_string, start_pos, token):
@@ -175,234 +182,180 @@ def find_token_pair_by_pos(parser_string, start_pos, token):
     return -1
 
 
-def find_token_pair_pos(parser_string, token):
-    # todo: 把这个函数去掉，改成使用find_token_pair_by_pos
+def match_and_check_function_body(parser_string, start_pos):
     """
-    一直读到符号匹配的对，包括<>, {}, ()
-    :param token:  <, {, (
-    :param parser_string: 解析的字符串
-    :return: i: 读取到的字符的位置
-    """
-    assert token == "<" or token == "{" or token == "(" or token == "["
-
-    redundancy = 1      # 冗余的符号个数，因为解析可能解析到<<>>,如果是第一个<则需要一直读取到第四个>才算匹配
-    if token == "<":
-        pattern_symbol = ">"
-    elif token == "{":
-        pattern_symbol = "}"
-    elif token == "(":
-        pattern_symbol = ")"
-    elif token == "[":
-        pattern_symbol = "]"
-    else:
-        assert False
-
-    ret_string = ""
-    for i in range(0, len(parser_string)):
-        c = parser_string[i]
-        if c == token:
-            redundancy += 1
-            ret_string += c
-        elif c == pattern_symbol:
-            redundancy -= 1
-            if redundancy != 0:
-                ret_string += c
-        else:
-            ret_string += c
-
-        if redundancy == 0:
-            return i
-
-    return -1
-
-
-def read_function_by_regex(parser_string, regex):
-    """
-    根据指定的正则表达式，查找函数
-    :param parser_string: 需要解析的字符串
-    :param regex:         指定则正则表达式
-    :return: functions  解析出来的函数体, FunctionContext
-             parser_string 解析完毕后剩下的字符串
-    """
-    assert regex is not None
-
-    functions = list()
-    while True:
-        search = regex.search(parser_string)
-        if search is None:
-            break
-
-        begin_function_pos = search.start(0)
-        end_function_pos = search.end(0)
-
-        close_brace_pos = find_token_pair_pos(parser_string[end_function_pos+1:], "(")+1
-        close_brace_pos += end_function_pos
-
-        function_context = FunctionContext()
-        function_context.function_declare = parser_string[begin_function_pos:close_brace_pos+1]
-
-        # 从函数声明开始找，如果先遇见; 则代表只是一个函数声明
-        # 如果先遇见'{' 则表示是一个函数实现，需要把所有的函数体读取出来
-        for i in range(close_brace_pos+1, len(parser_string)):
-            c = parser_string[i]
-
-            if c is ';':
-                end_function_pos = i+1
-                break
-            elif c is '{':
-                end_function_pos = i
-                pair_token_pos = find_token_pair_pos(parser_string[end_function_pos+1:], "{") + 1
-                body_end = end_function_pos + pair_token_pos + 1
-                function_context.function_impl = parser_string[end_function_pos: body_end]
-                end_function_pos = body_end
-                assert end_function_pos != -1
-                break
-
-        functions.append(function_context)
-
-        parser_string = parser_string[0:begin_function_pos] + parser_string[end_function_pos:]
-
-    return functions, parser_string
-
-
-def read_scope_var(parser_string):
-    """
-    读取作用域范围内所有的var变量
-    :return: ret_vars, parser_string
-
-             ret_vars: 读取到的变量列表, 列表内容是VarContext结构体
-             parser_string: 解析后的字符串
+    返回函数解析出来的问题
+    :param parser_string
+    :param start_pos:
+    :return: function_body_begin_pos, function_body_end_pos, error_message
     """
 
-    ret_vars = list()
-    scope_begin = get_next_token_pos(parser_string, "{")
-    if scope_begin == -1:
-        scope_begin = 0
-
-    while True:
-        search = var_regex.search(parser_string, scope_begin)
-        if search is None:
-            break
-
-        begin_var_pos = search.start(0)
-        end_var_pos = search.end(0)
-        if TokenParser.token_count(search.group()) == 1:
-            scope_begin = search.end()
-            continue
-
-        next_token_pos = get_next_token_pos(parser_string[end_var_pos:], ";")
-        assert next_token_pos != -1
-        next_token_pos += end_var_pos + 2
-        var_context = VarContext(parser_string[begin_var_pos:next_token_pos])
-        ret_vars.append(var_context)
-        parser_string = parser_string[0: begin_var_pos] + parser_string[next_token_pos:]
-
-    return ret_vars, parser_string
-
-
-def check_function(function_context):
-    """
-    检测函数的通用规则，普通的函数和类成员函数规则不一样, 普通函数的命名在其他地方检测
-    :param function_context:  函数体
-    :return: error_message
-    """
-    assert isinstance(function_context, FunctionContext)
+    assert parser_string[start_pos] == "{"
+    function_body_end_pos = find_token_pair_by_pos(parser_string, start_pos, "{")
     error_message = list()
 
-    # 解析函数声明
-    declare_error = function_context.check_params()
-    if declare_error:
-        error_message.append(
-            ErrorReport(
-                line=FileContext.current_line,
-                message=declare_error,
-                error_context=function_context.function_declare
-            )
-        )
+    logging.debug("begin match function body->")
+    while start_pos < function_body_end_pos:
+        start_pos = next_token_pos_not_space(parser_string, start_pos+1)
+        logging.debug("match->" + parser_string[start_pos:next_line_break_pos(parser_string, start_pos+1)])
 
-    # 解析函数体
-    if function_context.function_impl:
-        function_vars = peek_scope_vars(function_context)
-        for function_var in function_vars:
-            msg = check_scope_var(function_var)
-            if msg:
-                error_message.append(
-                    ErrorReport(
-                        line=FileContext.current_line,
-                        message=msg,
-                        error_context=function_var.var_str
+        logging.debug("match if stat")
+        if_start_pos, if_end_pos = match_if_stat(parser_string, start_pos)
+        if if_start_pos != -1:
+            start_pos = if_end_pos+1
+            continue
+
+        logging.debug("match del stat")
+        del_start_pos, del_end_pos = match_delete_stat(parser_string, start_pos)
+        if del_start_pos != -1:
+            start_pos = del_end_pos+1
+            continue
+
+        logging.debug("match for stat")
+        for_start_pos, for_end_pos = match_for_stat(parser_string, start_pos)
+        if for_start_pos != -1:
+            start_pos = for_end_pos+1
+            continue
+
+        logging.debug("match stream stat")
+        stream_start_pos, stream_end_pos = match_stream_stat(parser_string, start_pos)
+        if stream_start_pos != -1:
+            start_pos = stream_end_pos+1
+            continue
+
+        logging.debug("match while stat")
+        while_start_pos, while_end_pos = match_while_stat(parser_string, start_pos)
+        if while_start_pos != -1:
+            start_pos = while_end_pos+1
+            continue
+
+        logging.debug("match do while stat")
+        do_while_start_pos, do_while_end_pos = match_do_while_stat(parser_string, start_pos)
+        if do_while_start_pos != -1:
+            start_pos = do_while_end_pos+1
+            continue
+
+        logging.debug("match emit")
+        emit_start_pos, emit_end_pos = match_stat(parser_string, start_pos, emit_stat_regex)
+        if emit_start_pos != -1:
+            start_pos = emit_end_pos+1
+            continue
+
+        logging.debug("match switch stat")
+        match = switch_stat_regex.match(parser_string,start_pos)
+        if match:
+            start_pos = find_token_pair_by_pos(parser_string, match.end()-1, "{")+1
+            assert parser_string[start_pos-1] == "}"
+            continue
+
+        logging.debug("match function call")
+        function_call_start_pos, function_call_end_pos = match_stat(parser_string, start_pos, function_call_regex)
+        if function_call_start_pos != -1:
+            start_pos = function_call_end_pos + 1
+            continue
+
+        logging.debug("match return stat")
+        match = return_stat_regex.match(parser_string, start_pos)  # return 语句略过不解析
+        if match:
+            start_pos = match.end()
+            continue
+
+        logging.debug("match assign stat")
+        match = assign_start_regex.match(parser_string, start_pos)
+        if match:
+            # 获取=号前面的语句，然后进行解析
+            for var_index in range(match.end()-1, match.start(), -1):
+                c = parser_string[var_index]
+                if c is not "=" \
+                        and c is not "+"\
+                        and c is not "-"\
+                        and c is not "*"\
+                        and c is not "/"\
+                        and c is not " ":
+                    break
+
+            left_op = parser_string[match.start():var_index+1]
+            var_match = var_regex.match(left_op)
+            if var_match:
+                var_str = parser_string[match.start(): var_index+1]
+                var_error_message = check_scope_var(var_str)
+                if var_error_message:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=var_error_message,
+                            error_context=var_str
+                        )
                     )
-                )
 
-    return error_message
+            start_pos = parser_string.find(";", match.end())+1
+            continue
+
+        logging.debug("match var stat")
+        match = var_regex.match(parser_string, start_pos)
+        if match:
+            end_token = parser_string.find(";", match.end())
+            if end_token is not -1:
+                var_str = parser_string[match.start():end_token+1]
+                var_error_message = check_scope_var(var_str)
+                if var_error_message:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=var_error_message,
+                            error_context=var_str
+                        )
+                    )
+                start_pos = end_token+1
+                continue
+
+        # 如果没有找到合适的结构的，则跳过
+        logging.debug("unknow stat, contine...")
+        end = parser_string.find(";", start_pos)
+        if end == -1:
+            break
+        start_pos = end+1
+
+    return start_pos, function_body_end_pos, error_message
 
 
-def check_scope_var(member_var):
+def check_scope_var(var_str):
     """
     检测局部变量
-    :param member_var:  局部变量
+    :param var_str:  局部变量
     :return: error_message
     """
-
-    assert isinstance(member_var, VarContext)
-
-    if member_var.var_name()[0:2] != "l_":
+    match = var_regex.match(var_str)
+    assert match is not None
+    var_name = match.groupdict().get("var_name")
+    if var_name[0:2] != "l_":
         return LOCAL_VAR_MUST_BE_L_BEGIN
 
     return None
 
 
-def check_class_member_var(member_var):
+def check_class_member_var(var_str):
     """
     检测类成员变量
-    :param member_var: 成员变量
+    :param var: 变量的字符串
     :return: error_message
     """
-    assert isinstance(member_var, VarContext)
-
-    if member_var.var_name()[0:2] != "m_":
+    match = var_regex.match(var_str)
+    assert match is not None
+    var_name = match.groupdict().get("var_name")
+    if var_name[0:2] != "m_":
         return CLASS_MEMBER_MUST_M_BEGIN
 
     return None
 
 
-class VarContext:
+def is_static(var_str):
     """
-    变量的相关信息
+    检测var变量是否静态
+    :param var_str:
+    :return:
     """
-    def __init__(self, var_str=None):
-        self.var_str = var_str
-
-    def var_count(self):
-        """
-        获取声明了多少个变量
-        :return:
-        """
-
-        # todo: var_regex如果用search会有问题,具体看var_name里面的todo注释
-        match = var_regex.match(remove_begin_space_and_newline(self.var_str))
-        assert match is not None
-        end = match.end(match.lastgroup)
-        # int a, b, c  找到a后面的地方
-        remainder_str = self.var_str[end:]
-        return remainder_str.count(",")+1
-
-    def var_name(self):
-        """
-        获取第一个变量的名称
-        :return:
-        """
-
-        # todo: 这里需要把前面的\t \n等删除，否则这个正则表达式查找的时候会有问题
-        # 比如: \tstatic map<string, vector<QTranslator*>*>* m_pLanguages;这里会把var_name解析成map
-        search = var_regex.search(remove_begin_space_and_newline(self.var_str))
-        var_name = search.groupdict().get("var_name")
-        assert var_name is not None
-
-        return var_name
-
-    def is_static(self):
-        return self.var_str.find("static ") != -1
+    return var_str.find("static ") != -1
 
 
 class FileContext:
@@ -430,53 +383,29 @@ class FileContext:
         return FileContext.current_file_name.endswith(".h")
 
 
-class FunctionContext:
+def check_params(parser_string, start_pos, end_pos):
     """
-    函数的相关信息
+    检测函数参数的格式是否正确,返回error_message
+    :param parser_string:
+    :param start_pos:
+    :param end_pos:
+    :return: error_message, 如果有错误返回错误信息,否则为None
     """
-    # 参数间隔的正则表达式
-    param_regex = re.compile(r"\s*(?:const\s+)?((\w+::)?(\w+))(<[\w<>:\s\d,]+>)?(\s|\*|&)+\w+,")
+    assert parser_string[start_pos] == "(" and parser_string[end_pos] == ")"
 
-    def __init__(self):
-        self.function_declare = None
-        self.function_impl = None
-
-    def function_name(self):
-
-        match = function_regex.match(self.function_declare)
-        # 重载操作符则把整个声明都当作函数名
+    while start_pos < end_pos:
+        match = param_regex.match(parser_string, start_pos, end_pos)
         if match is None:
-            match = operator_regex.match(self.function_declare)
-            if match:
-                return self.function_declare
-        assert match is not None
+            break
 
-        name = match.groupdict().get("function_name")
-        return name
+        c = parser_string[match.end()-1]
+        if c != ' '\
+                and c != '\n':
+            return FUNCTION_PARAM_MUST_BE_SPACE
 
-    def check_params(self):
-        """
-        分析所有函数的参数
-        :return:
-        """
-        begin_pos = self.function_declare.find("(")
-        if begin_pos == -1:
-            return -1
+        start_pos = match.end()
 
-        while True:
-            search = self.param_regex.search(self.function_declare, begin_pos)
-            if search is None:
-                return None
-
-            param_end = search.end()
-            c = self.function_declare[param_end]
-            if c != ' '\
-                    and c != '\n':
-                return FUNCTION_PARAM_MUST_BE_SPACE
-
-            begin_pos = param_end+1
-
-        return None
+    return None
 
 
 class ErrorReport:
@@ -506,7 +435,7 @@ class TokenParser:
     辅助解析Token的,负责从begin_pos开始解析每一个token
     """
     # 分隔符的正则表达式
-    token_regex = re.compile(r'(\w+|}|{|::|;|\(|\)|,|\*|<|>|\[|\])')
+    token_regex = re.compile(r'(\w+|}|{|::|;|\(|\)|,|\*|<|>|\[|\]|=)')
 
     def __init__(self, parser_string, begin_pos):
         self.token_iter = self.token_regex.finditer(parser_string, begin_pos)
@@ -632,6 +561,7 @@ def next_line_break_pos(parser_string, start_pos):
 def match_and_check_class_declare_function(parser_string, start_pos):
     """
     从start_pos开始检测，查看是否符合类成员函数声明的语法
+    这个检测的是在class声明里面的函数
     :param parser_string:
     :param start_pos:
     :return: stat_start, stat_end, error_message, 如果没有匹配，则返回-1, -1, []
@@ -647,38 +577,33 @@ def match_and_check_class_declare_function(parser_string, start_pos):
         return -1, -1, error_message
 
     function_declare_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
-    function_context = FunctionContext()
-    function_context.function_declare = parser_string[start_pos:function_declare_end_pos+1]
-    try:
-        parser = TokenParser(parser_string, function_declare_end_pos+1)
-        parser.next_token()
-    except StopIteration:
-        return -1, -1, error_message
+    param_error = check_params(parser_string, match.end()-1, function_declare_end_pos)
+    if param_error:
+        error_message.append(
+            ErrorReport(
+                line=FileContext.current_line,
+                message=param_error,
+                error_context=parser_string[match.start():function_declare_end_pos+1]
+            )
+        )
 
-    if parser.current_token() == "const":
-        parser.next_token()
+    for i in range(function_declare_end_pos+1, len(parser_string)):
+        c = parser_string[i]
+        if c == ";":
+            return start_pos, i, error_message      # 找到声明结束直接退出
+        elif c == "{":
+            break
 
-    if parser.current_token() == ";":
-        function_end_pos = parser.current_token_end_pos()-1
-    else:
-        # 这里有可能只是类似于CIT_BEGIN_ENUM的枚举，所以直接跳过
-        if parser.current_token() != "{":
-            return -1, 1, error_message
+    body_start, body_end, body_error = match_and_check_function_body(parser_string, i)
+    if len(body_error):
+        error_message.extend(body_error)
 
-        function_body_begin_pos = parser.current_token_end_pos()-1
-        function_end_pos = find_token_pair_by_pos(parser_string, function_body_begin_pos, "{")
-        function_context.function_impl = parser_string[function_body_begin_pos:function_end_pos+1]
-
-    check_function_error_message = check_function(function_context)
-    if len(check_function_error_message):
-        error_message.append(check_function_error_message)
-
-    return start_pos, function_end_pos, error_message
+    return start_pos, body_end, error_message
 
 
 def match_and_check_function(parser_string, start_pos):
     """
-    从start_pos开始检测,是否符合函数定义语法
+    从start_pos开始检测,是否符合函数定义语法, 检测的是普通函数的语法
     :param parser_string: 需要解析的语句
     :param start_pos: 开始的位置,
     :return: stat_start, stat_end, error_message,如果没有匹配，则返回-1, -1, []
@@ -696,43 +621,41 @@ def match_and_check_function(parser_string, start_pos):
         return -1, -1, error_message
 
     function_declare_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
-    function_context = FunctionContext()
-    function_context.function_declare = parser_string[start_pos:function_declare_end_pos+1]
-    try:
-        parser = TokenParser(parser_string, function_declare_end_pos+1)
-        parser.next_token()
-    except StopIteration:
-        return -1, -1, error_message
-
-    if parser.current_token() == "const":
-        parser.next_token()
-
-    if parser.current_token() == ";":
-        function_end_pos = parser.current_token_end_pos()-1
-    else:
-        # 这里有可能只是类似于CIT_BEGIN_ENUM的枚举，所以直接跳过
-        if parser.current_token() != "{":
-            return -1, 1, error_message
-
-        function_body_begin_pos = parser.current_token_end_pos()-1
-        function_end_pos = find_token_pair_by_pos(parser_string, function_body_begin_pos, "{")
-        function_context.function_impl = parser_string[function_body_begin_pos:function_end_pos+1]
-
-    function_name = function_context.function_name()
-    if function_name[0:3] != "cit" and not is_operator and function_name != "main":
+    param_error = check_params(parser_string, match.end()-1, function_declare_end_pos)
+    if param_error:
         error_message.append(
             ErrorReport(
                 line=FileContext.current_line,
-                message=FUNCTION_NAME_BEGIN_CIT,
-                error_context=function_context.function_declare
+                message=param_error,
+                error_context=parser_string[start_pos:function_declare_end_pos+1]
             )
         )
 
-    check_function_error_message = check_function(function_context)
-    if len(check_function_error_message):
-        error_message.extend(check_function_error_message)
+    if not is_operator:
+        function_name = match.groupdict().get("function_name")
+        if function_name[0:3] != "cit" and function_name != "main":
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=FUNCTION_NAME_BEGIN_CIT,
+                    error_context=parser_string[start_pos:function_declare_end_pos+1]
+                )
+            )
 
-    return start_pos, function_end_pos, error_message
+    for i in range(function_declare_end_pos+1, len(parser_string)):
+        c = parser_string[i]
+        if c == ";":
+            return start_pos, i, error_message
+        elif c == "{":
+            break
+
+    body_start_pos, body_end_pos, body_error = \
+        match_and_check_function_body(parser_string, i)
+    if len(body_error):
+        error_message.extend(body_error)
+
+
+    return start_pos, body_end_pos, error_message
 
 
 def match_and_check_class_var(parser_string, start_pos):
@@ -751,30 +674,29 @@ def match_and_check_class_var(parser_string, start_pos):
     if len(var_name) == 0:
         return -1, -1, error_message
 
-    var_context = VarContext()
-    var_context.var_str = parser_string[match.start():match.end()]
+    var_str = parser_string[match.start():match.end()]
 
     while True:
-        if len(var_context.var_name()) < 3:
+        if len(var_name) < 3:
             error_message.append(ErrorReport(line=FileContext.current_line,
                                              message=VAR_NAME_TOO_SHORT,
-                                             error_context=var_context.var_str))
+                                             error_context=var_str))
             break
 
-        if var_context.var_name()[0:2] != "m_":
+        if var_name[0:2] != "m_":
             error_message.append(ErrorReport(
                 line=FileContext.current_line,
                 message=CLASS_MEMBER_MUST_M_BEGIN,
-                error_context=var_context.var_str
+                error_context=var_str
             ))
 
-        pointer_err = check_pointer_and_ref(var_context)
+        pointer_err = check_pointer_and_ref(var_str)
         if pointer_err is not None:
             error_message.append(
                 ErrorReport(
                     line=FileContext.current_line,
                     message=POINT_OR_REF_NEAR_TYPE,
-                    error_context=var_context.var_str
+                    error_context=var_str
                 )
             )
             break
@@ -801,25 +723,48 @@ def match_and_check_var(parser_string, start_pos):
     if len(var_name) == 0:
         return -1, -1, error_message
 
-    var_context = VarContext()
-    var_context.var_str = parser_string[match.start():match.end()]
+    var_str = parser_string[match.start():match.end()]
 
     while True:
-        if len(var_context.var_name()) < 3:
-            error_message.append({var_context.var_str: VAR_NAME_TOO_SHORT})
+        if len(var_name) < 3:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=VAR_NAME_TOO_SHORT,
+                    error_context=var_str
+                )
+            )
             break
 
-        if var_context.is_static():
-            if var_context.var_name()[0:2] != "s_":
-                error_message.append({var_context.var_str: STATIC_VAR_BEGIN_S})
+        if is_static(var_str):
+            if var_name[0:2] != "s_":
+                error_message.append(
+                    ErrorReport(
+                        line=FileContext.current_line,
+                        message=STATIC_VAR_BEGIN_S,
+                        error_context=var_str
+                    )
+                )
                 break
-        elif var_context.var_name()[0:2] != "g_":
-            error_message.append({var_context.var_str: GLOBAL_VAR_BEGIN_G})
+        elif var_name[0:2] != "g_":
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=GLOBAL_VAR_BEGIN_G,
+                    error_context=var_str
+                )
+            )
             break
 
-        pointer_err = check_pointer_and_ref(var_context)
+        pointer_err = check_pointer_and_ref(var_str)
         if pointer_err is not None:
-            error_message.append({var_context.var_str: pointer_err})
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=pointer_err,
+                    error_context=var_str
+                )
+            )
             break
         break
 
@@ -891,6 +836,21 @@ def match_class_access(parser_string, start_pos):
     return match.start(), end_pos
 
 
+def match_stat(parser_string, start_pos, regex):
+    """
+    查看是否符合regex的语句,如果符合则返回起始和结束为止,否则返回-1, -1
+    :param parser_string:
+    :param start_pos:
+    :param regex: 匹配的正则表达式
+    :return: start_pos, end_pos, 语句开始和结束的位置,如果没有则返回-1,-1
+    """
+    match = regex.match(parser_string, start_pos)
+    if match is None:
+        return -1, -1
+
+    return match.start(), match.end()-1
+
+
 def match_friend_declare(parser_string, start_pos):
     """
     从start_pos开始检测，是否符合友元函数语法，并且检测错误
@@ -935,7 +895,7 @@ def match_and_check_class_impl(parser_string, start_pos):
     :param start_pos:
     :return: stat_start, stat_end, error_message
     """
-    error_message = []
+    error_message = list()
     while True:
         match = destroy_impl_start_regex.match(parser_string, start_pos)
         if match:
@@ -951,33 +911,10 @@ def match_and_check_class_impl(parser_string, start_pos):
         return -1, -1, error_message
 
     function_declare_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
-    function_context = FunctionContext()
-    function_context.function_declare = parser_string[start_pos:function_declare_end_pos+1]
-    try:
-        parser = TokenParser(parser_string, function_declare_end_pos+1)
-        parser.next_token()
-    except StopIteration:
-        return -1, -1, error_message
-
-    if parser.current_token() == "const":
-        parser.next_token()
-
-    if parser.current_token() == ";":
-        function_end_pos = parser.current_token_end_pos()-1
-    else:
-        # 这里有可能只是类似于CIT_BEGIN_ENUM的枚举，所以直接跳过
-        if parser.current_token() != "{":
-            return -1, -1, error_message
-
-        function_body_begin_pos = parser.current_token_end_pos()-1
-        function_end_pos = find_token_pair_by_pos(parser_string, function_body_begin_pos, "{")
-        function_context.function_impl = parser_string[function_body_begin_pos:function_end_pos+1]
-
-    check_function_error_message = check_function(function_context)
-    if len(check_function_error_message):
-        error_message.extend(check_function_error_message)
-
-    return start_pos, function_end_pos, error_message
+    function_body_begin_pos = parser_string.find("{", function_declare_end_pos)
+    function_body_start_pos, function_body_end_pos, error_message = \
+        match_and_check_function_body(parser_string, function_body_begin_pos)
+    return start_pos, function_body_end_pos, error_message
 
 
 def match_and_check_class(parser_string, start_pos):
@@ -1024,14 +961,20 @@ def match_and_check_class(parser_string, start_pos):
             if parser_string[next_token_pos-1] != " " and parser_string[next_token_pos+1] != " ":
                 error_message.append(ErrorReport(line=FileContext.current_line,
                                                  message=CLASS_INHERIT_COLON_MUST_BE_SPACE,
-                                                 error_context=parser_string[match.start(), match.end()]))
+                                                 error_context=parser_string[match.start(): match.end()]))
         class_declare_begin = parser_string.find("{", next_token_pos)
 
+        old_class_start_pos = class_declare_begin
         class_start_pos = class_declare_begin+1
         while True:
+            assert old_class_start_pos < class_start_pos
             old_class_start_pos = class_start_pos
             class_start_pos = next_token_pos_not_space(parser_string, class_start_pos)
-            assert old_class_start_pos <= class_start_pos
+            if parser_string[class_start_pos] == ";":
+                class_start_pos += 1
+                continue
+            logging.debug("begin match:" + parser_string[class_start_pos:next_line_break_pos(parser_string, class_start_pos)])
+            FileContext.current_line = parser_string.count("\n", 0, class_start_pos)+1
 
             access_start, access_end = match_class_access(parser_string, class_start_pos)
             if access_start != -1:
@@ -1041,6 +984,16 @@ def match_and_check_class(parser_string, start_pos):
             friend_start, friend_end = match_friend_declare(parser_string, class_start_pos)
             if friend_start != -1:
                 class_start_pos = friend_end + 1
+                continue
+
+            enum_stat_start, enum_stat_end = match_stat(parser_string, class_start_pos, enum_stat_regex)
+            if enum_stat_start != -1:
+                class_start_pos = enum_stat_end+1
+                continue
+
+            q_property_stat_start, q_property_stat_end = match_stat(parser_string, class_start_pos, qproperty_stat_regex)
+            if q_property_stat_start != -1:
+                class_start_pos = q_property_stat_end+1
                 continue
 
             class_start_pos, is_continue = helper_match_and_check(error_message,
@@ -1090,8 +1043,11 @@ def match_and_check_class(parser_string, start_pos):
                 return start_pos, class_start_pos+1, error_message
 
             class_start_pos = parser_string.find(";", class_start_pos)
-            assert class_start_pos == -1
-            return start_pos, class_start_pos, error_message
+            if parser_string[class_start_pos-1:class_start_pos+1] == "};":
+                return start_pos, class_start_pos, error_message
+            class_start_pos += 1
+            if len(parser_string) <= class_start_pos:
+                break
     finally:
         FileContext.current_parser_context = FileContext.PARSER_TYPE_FILE
 
@@ -1399,6 +1355,22 @@ def helper_match_and_check(all_error_message, parser_string, start_pos, match_an
     return start_pos, False
 
 
+def match_static_init(parser_string, start_pos):
+    """
+    好看是否符合静态变量初始化的语句
+    :param parser_string:
+    :param start_pos:
+    :return: start_pos, end_pos
+    """
+
+    match = class_static_init_regex.match(parser_string, start_pos)
+    if match is None:
+        return -1, -1
+
+    end_pos = parser_string.find(";", match.end())
+    return start_pos, end_pos
+
+
 def match_and_check(parser_string, start_pos):
     """
     检测语法规则
@@ -1409,16 +1381,21 @@ def match_and_check(parser_string, start_pos):
     all_error_message = list()
     old_pos = start_pos-1
     while True:
+        logging.debug("---------------------------------------")
         start_pos = next_token_pos_not_space(parser_string, start_pos)
+        message_end = next_line_break_pos(parser_string, start_pos)
+        logging.debug("match begin:" + parser_string[start_pos:message_end] )
         if start_pos == -1:
             break
         assert start_pos > old_pos
+        FileContext.current_line = parser_string.count("\n", 0, start_pos)
+
         old_pos = start_pos
-        FileContext.current_line = parser_string.count("\n", 0, start_pos+1)
 
         if start_pos == -1:
             break
 
+        logging.debug("begin match define")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1426,6 +1403,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match enum")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1433,6 +1411,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match include")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1440,6 +1419,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match typedef")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1447,6 +1427,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match class")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1454,6 +1435,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match class_impl")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1466,19 +1448,39 @@ def match_and_check(parser_string, start_pos):
         prec_start_pos, prec_end_pos = match_prec_stat(parser_string, start_pos)
         if prec_start_pos != -1:
             start_pos = prec_end_pos+1
+            logging.debug("step precompile stat:" + parser_string[prec_start_pos:prec_end_pos+1])
+            continue
+
+        logging.debug("begin match cit begin enum")
+        # cit begin enum 直接跳到尾部
+        cit_begin_enum_start_pos, cit_end_enum_end_pos = match_stat(parser_string, start_pos, cit_begin_enum_regex)
+        if cit_begin_enum_start_pos != -1:
+            start_pos = cit_end_enum_end_pos+1
+            logging.debug("step cit enum stat:" + parser_string[cit_begin_enum_start_pos:cit_end_enum_end_pos])
             continue
 
         # using namespace 直接跳过
         using_start_pos, using_end_pos = match_using_namespace(parser_string, start_pos)
         if using_start_pos != -1:
             start_pos = using_end_pos+1
+            logging.debug("step using namespace:" + parser_string[using_start_pos:using_end_pos])
             continue
 
+        logging.debug("begin match struct")
         struct_start_pos, struct_end_pos = match_struct(parser_string, start_pos)
         if struct_start_pos != -1:
+            logging.debug("step struct;")
             start_pos = struct_end_pos+1
             continue
 
+        logging.debug("begin match static init")
+        static_init_start_pos, static_init_end_pos = match_static_init(parser_string, start_pos)
+        if static_init_start_pos != -1:
+            logging.debug("step static ini")
+            start_pos = static_init_end_pos+1
+            continue
+
+        logging.debug("begin match function")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1486,6 +1488,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("begin match var")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1493,6 +1496,7 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
+        logging.debug("unknow stat, continue next line:")
         start_pos = next_line_break_pos(parser_string, start_pos)
         if len(parser_string) <= start_pos:
             break
@@ -1517,112 +1521,6 @@ def match_struct(parser_string, start_pos):
     struct_end_pos = parser_string.find(";", struct_end_pos+1)
     assert parser_string[struct_end_pos] == ";"
     return match.start(), struct_end_pos
-
-
-def peek_scope_vars(function_context):
-    """
-    解析function_context下的所有分析后的变量声明, 不会对function_context进行修改
-    read_scope_var则会对数据进行修改(read_scope_var已经被废弃，尽量不要使用)
-    :param function_context:
-    :return: 返回所有解析出来的变量
-    """
-
-    scope_vars = list()
-    assert isinstance(function_context, FunctionContext)
-    context = function_context.function_impl
-    not_space = re.compile(r"(\w)+")
-    regex_start = 0
-    while True:
-        search = not_space.search(context, regex_start)       # 从1开始是为了去掉{符号
-        if search is None:
-            break
-
-        if_start_pos, if_end_pos = match_if_stat(context, start_pos=search.start())
-        if if_start_pos != -1:
-            regex_start = if_end_pos+1
-            continue
-
-        del_start_pos, del_end_pos = match_delete_stat(context, start_pos=search.start())
-        if del_start_pos != -1:
-            regex_start = del_end_pos+1
-            continue
-
-        for_start_pos, for_end_pos = match_for_stat(context, start_pos=search.start())
-        if for_start_pos != -1:
-            assert context[for_end_pos] == "}"
-            regex_start = for_end_pos+1
-            continue
-
-        stream_start_pos, stream_end_pos = match_stream_stat(context, start_pos=search.start())
-        if stream_start_pos != -1:
-            regex_start = stream_end_pos+1
-            continue
-
-        while_start_pos, while_end_pos = match_while_stat(context, start_pos=search.start())
-        if while_start_pos != -1:
-            regex_start = while_end_pos+1
-            continue
-
-        do_while_start_pos, do_while_end_pos = match_do_while_stat(context, start_pos=search.start())
-        if do_while_start_pos != -1:
-            regex_start = do_while_end_pos+1
-            continue
-
-        match = switch_stat_regex.match(context, search.start())
-        if match:
-            regex_start = find_token_pair_pos(context[match.end():], "{") + match.end()+1
-            assert context[regex_start-1] == "}"
-            continue
-
-        match = return_stat_regex.match(context, search.start())  # return 语句略过不解析
-        if match:
-            regex_start = match.end()
-            continue
-
-        match = assign_regex.match(context, search.start())
-        if match:
-            # 获取=号前面的语句，然后进行解析
-            for var_index in range(match.end()-1, match.start(), -1):
-                c = context[var_index]
-                if c is not "=" \
-                        and c is not "+"\
-                        and c is not "-"\
-                        and c is not "*"\
-                        and c is not "/"\
-                        and c is not " ":
-                    break
-
-            left_op = context[match.start():var_index+1]
-            if var_regex.match(left_op):
-                var_context = VarContext()
-                var_context.var_str = context[match.start(): var_index+1]
-                scope_vars.append(var_context)
-
-            regex_start = context.find(";", match.end())+1
-            continue
-
-        match = function_regex.match(context, search.start())
-        if match:
-            regex_start = context.find(";", match.end())+1
-            continue
-
-        match = var_regex.match(context, search.start())
-        if match:
-            end_token = context.find(";", match.end())
-            if end_token is not -1:
-                var_context = VarContext()
-                var_context.var_str = context[match.start():end_token+1]
-                scope_vars.append(var_context)
-                regex_start = end_token+1
-                continue
-
-        # 如果没有找到合适的解析的，则跳过
-        end = context.find(";", search.end())
-        if end == -1:
-            break
-        regex_start = end+1
-
-    return scope_vars
 
 
 def remove_comment(parser_string):
@@ -1717,6 +1615,7 @@ def check_file(file_path):
     """
     try:
         FileContext.current_file_name = os.path.basename(file_path)
+        FileContext.current_line = 1
         data = read_file_data(file_path)
         match_and_check_result = match_and_check(data, 0)
         for rule in match_and_check_result:
@@ -1729,20 +1628,20 @@ def check_file(file_path):
     return None
 
 
-def check_pointer_and_ref(var_context):
+def check_pointer_and_ref(var_str):
     """
     检测变量类型的*和&修饰符
-    :param var_context: VarContext结构体
+    :param var_str: 数据字符串
     :return: 如果有问题，在返回错误，没有则返回None
     """
-    pointer_pos = var_context.var_str.find("*")
+    pointer_pos = var_str.find("*")
     if pointer_pos != -1:
-        if var_context.var_str[pointer_pos-1] == " ":
+        if var_str[pointer_pos-1] == " ":
             return POINT_OR_REF_NEAR_TYPE
 
-    ref_pos = var_context.var_str.find("&")
+    ref_pos = var_str.find("&")
     if ref_pos != -1:
-        if var_context.var_str[ref_pos-1] == " ":
+        if var_str[ref_pos-1] == " ":
             return POINT_OR_REF_NEAR_TYPE
 
     return None
@@ -1771,14 +1670,14 @@ def check_dir(dir_path):
         for file in files:
             if file.endswith(".h") or file.endswith(".cpp"):
                 try:
-                    print("解析文件"+file)
+                    logging.info("解析文件"+file)
                     check_rule = check_file(root + '/' + file)
                     if check_rule:
-                        error_message.append({file: check_rule})
+                        error_message.extend(check_rule)
                 except UnicodeDecodeError as e:
-                    print("解析"+file+"文件编码错误:" + str(e))
+                    logging.error("解析"+file+"文件编码错误:" + str(e))
                 except AssertionError as e:
-                    print("解析"+file+"文件有断言")
+                    logging.error("解析"+file+"文件有断言")
 
     return error_message
 
@@ -1786,17 +1685,19 @@ if __name__ == "__main__":
     import sys
     import getopt
     opts, args = getopt.getopt(sys.argv[1:], "hf:d:")
+    logging.basicConfig(level=logging.DEBUG,
+                        format="[line:%(lineno)d] %(levelname)s %(message)s")
     check_result = None
     for opt, value in opts:
         if opt == "-f":
             check_result = check_file(value)
+
         elif opt == "-d":
             check_result = check_dir(value)
         else:
             continue
 
-    count = count_rule(check_result)
-    for rule in check_result:
-        print(rule)
+    for result in check_result:
+        print(result)
 
-
+    print("总共发现:" + str(len(check_result)))

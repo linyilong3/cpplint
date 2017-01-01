@@ -48,17 +48,48 @@ class CppLintTest(unittest.TestCase):
         test_string = cppLint.remove_comment(test_string)
         self.assertEqual(len(test_string), len("kkkjie"))
 
+    def test_match_var(self):
+        match = cppLint.var_regex.match("m_sProcess = new QProcess();")
+        self.assertIsNone(match)
+
+        match = cppLint.var_regex.match("switch(type)")
+        self.assertIsNone(match)
+
+        match = cppLint.var_regex.match("static map<string, string>* m_pThemes;\n")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groupdict().get("var_name"), "m_pThemes")
+
+        match = cppLint.var_regex.match("static map<string, string> *m_pThemes;\n")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groupdict().get("var_name"), "m_pThemes")
+
+        match = cppLint.var_regex.match("const char *g_p = nullptr;")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groupdict().get("var_name"), "g_p")
+
+    def test_match_and_check_assign(self):
+        test_string = "const char *g_p = nullptr;"
+        start_pos, end_pos, error_message = cppLint.match_and_check("const char *g_p = nullptr;")
+        self.assertEqual(start_pos, 0)
+        self.assertEqual(end_pos, len(test_string))
+        self.assertEqual(len(error_message), 1)
+        self.assertEqual(error_message[0].message, cppLint.POINT_OR_REF_NEAR_TYPE)
+
+
+    def test_match_emit(self):
+        match = cppLint.emit_stat_regex.match("citAlarmDecoder* l_pDecoder = NULL;")
+        self.assertIsNone(match)
+
+        match = cppLint.emit_stat_regex.match("switch(type)")
+        self.assertIsNone(match)
+
     def test_check_vars(self):
         test_string = "static map<string, string>* m_pThemes;\n"
-        var_context = cppLint.VarContext()
-        var_context.var_str = test_string
-        error = cppLint.check_class_member_var(var_context)
+        error = cppLint.check_class_member_var(test_string)
         self.assertIsNone(error)
 
         test_string = "static map<string, string>* m_pThemes;\n"
-        var_context = cppLint.VarContext()
-        var_context.var_str = test_string
-        error = cppLint.check_class_member_var(var_context)
+        error = cppLint.check_class_member_var(test_string)
         self.assertIsNone(error)
 
         var_declare = "static std::map<std::string, std::string> *pThemes;"
@@ -66,7 +97,7 @@ class CppLintTest(unittest.TestCase):
         self.assertEqual(start_pos, 0)
         self.assertEqual(end_pos, len(var_declare)-1)
         self.assertEqual(len(error), 1)
-        error_info = error[0].get(var_declare[0:len(var_declare)-1])
+        error_info = error[0].message
         self.assertIsNotNone(error_info)
         self.assertEqual(error_info, cppLint.STATIC_VAR_BEGIN_S)
 
@@ -75,7 +106,7 @@ class CppLintTest(unittest.TestCase):
         self.assertEqual(start_pos, 0)
         self.assertEqual(end_pos, len(var_declare)-1)
         self.assertEqual(len(error), 1)
-        error_info = error[0].get(var_declare[0:len(var_declare)-1])
+        error_info = error[0].message
         self.assertIsNotNone(error_info)
         self.assertEqual(error_info, cppLint.POINT_OR_REF_NEAR_TYPE)
 
@@ -84,7 +115,7 @@ class CppLintTest(unittest.TestCase):
         self.assertEqual(start_pos, 0)
         self.assertEqual(end_pos, len(var_declare)-1)
         self.assertEqual(len(error), 1)
-        error_info = error[0].get(var_declare[0:len(var_declare)-1])
+        error_info = error[0].message
         self.assertIsNotNone(error_info)
         self.assertEqual(error_info, cppLint.GLOBAL_VAR_BEGIN_G)
 
