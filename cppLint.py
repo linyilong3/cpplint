@@ -192,11 +192,13 @@ def match_and_check_function_body(parser_string, start_pos):
 
     assert parser_string[start_pos] == "{"
     function_body_end_pos = find_token_pair_by_pos(parser_string, start_pos, "{")
+    function_body_begin_pos = start_pos
     error_message = list()
 
     logging.debug("begin match function body->")
     while start_pos < function_body_end_pos:
         start_pos = next_token_pos_not_space(parser_string, start_pos+1)
+        FileContext.current_line += parser_string.count("\n", function_body_begin_pos, start_pos)
         logging.debug("match->" + parser_string[start_pos:next_line_break_pos(parser_string, start_pos+1)])
 
         logging.debug("match if stat")
@@ -648,7 +650,7 @@ def match_and_check_function(parser_string, start_pos):
             return start_pos, i, error_message
         elif c == "{":
             break
-
+    FileContext.current_line = parser_string.count("\n", 0, i)+1
     body_start_pos, body_end_pos, body_error = \
         match_and_check_function_body(parser_string, i)
     if len(body_error):
@@ -912,6 +914,7 @@ def match_and_check_class_impl(parser_string, start_pos):
 
     function_declare_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
     function_body_begin_pos = parser_string.find("{", function_declare_end_pos)
+    FileContext.current_line = parser_string.count("\n", 0, function_body_begin_pos)+1
     function_body_start_pos, function_body_end_pos, error_message = \
         match_and_check_function_body(parser_string, function_body_begin_pos)
     return start_pos, function_body_end_pos, error_message
@@ -1388,7 +1391,7 @@ def match_and_check(parser_string, start_pos):
         if start_pos == -1:
             break
         assert start_pos > old_pos
-        FileContext.current_line = parser_string.count("\n", 0, start_pos)
+        FileContext.current_line = parser_string.count("\n", 0, start_pos)+1
 
         old_pos = start_pos
 
