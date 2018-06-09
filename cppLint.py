@@ -1,16 +1,16 @@
 import re
 import os.path
 import logging
-# todo: 后续把所有match_*的代码都改成match_and_check_*的形式，可以比较好做递归下降来进行语法分析
 # todo: python在进行正则表达式匹配有时候会卡死
-
+# todo: 如果需要检查正则表达式的语法，可以看图形化界面 https://jex.im/regulex/#!embed=false&flags=&re=%5E(a%7Cb)*%3F%24
 # 正则表达式模板字符串
 template_regex_str = r"(?P<template><[\w<>:\s\d,\*&]+>)?"       # 匹配<>里面的东西
 # 指针或者引用的表达式
 pointer_or_ref_regex_str = r"((\s*(\*|&)+\s*)|\s+)"
 # 类型的正则表达式
-type_regex_str = r"(?P<type_name>(\w+::)?(\w+))" + template_regex_str + pointer_or_ref_regex_str
-
+type_regex_str = r"(?P<type_name>((long\s+long)|(\w+::)?(\w+)))" + template_regex_str + "(::\w+)?" + pointer_or_ref_regex_str
+# 操作符
+template_operator_symbol = r"(\+|-|\*|\/|\+\+|--|%|=|==)"
 # 变量名称的正则表达式
 var_name_str = r"(?P<var_name>(\w+))"
 
@@ -21,16 +21,17 @@ class_regex = re.compile(r"class\s+(\w+\s+)?(?P<class_name>\w+)")
 class_declare_regex = re.compile(r"class\s+(\w+\s+)?(?P<class_name>\w+);")
 
 # 函数起始位置的正则表达式
-function_regex = re.compile(r"((virtual|static|inline)\s*)?(\w+::)?(\w+)(<[\w<>:\d,\*\s&]+>)?\s*[\*,&]*\s*"
+function_regex = re.compile(r"((virtual|static|inline)\s*)?" + type_regex_str +
                             r"(?P<function_name>\w+)\s*\(")
 # 析构函数声明的正则表达式
 destroy_declare_regex = re.compile(r"(virtual\s+)?~\w+\((void)?\)")
-
+# 构造函数声明的正则表达式
+construct_decl_begin_regex = re.compile(r"\w+\s*\(")
 # 变量声明正则表达式
-var_regex = re.compile(r"(?:static\s+)?(?:const\s+)?" + type_regex_str + var_name_str)
+var_regex = re.compile(r"(?:static\s+)?(?:const\s+)?(?:struct\s+)?" + type_regex_str + var_name_str)
 
-#类静态变量初始化
-class_static_init_regex = re.compile(type_regex_str +r" +\w+::" + var_name_str)
+# 类静态变量初始化
+class_static_init_regex = re.compile(type_regex_str + "\w+::\w+" + var_name_str)
 
 # 友元函数声明
 friend_declare_regex = re.compile(r"friend")
@@ -46,20 +47,32 @@ operator_regex = re.compile(r"(static\s+)?(\w+::)?(\w+)(<[\w<>:\s\d,\*&]+>)?(\*|
 do_while_stat_regex = re.compile(r"do\s*\{")
 # while表达式
 while_stat_regex = re.compile(r"while\s*\((.|\s)+?\)\s*\{")
+# while表达式1
+while_match_regex = re.compile(r"[ \t\r]*while\s*\((.|\s)+?\)\s*\{")
 # for表达式
 for_stat_regex = re.compile(r"for\s*\((.|\s)*?;(.|\s)*?;(.|\s)*?\)\s*?{")
+# for表达式1
+for_match_regex = re.compile(r"[ \t\r]*for\s*\((.|\s)*?;(.|\s)*?;(.|\s)*?\)\s*?{")
+# foreach表达式
+foreach_stat_regex = re.compile(r"foreach\s*\(")
 # switch表达式
 switch_stat_regex = re.compile(r"switch\s*\((.|\s)+?\)\s*\{")
+# switch表达式1
+switch_match_regex = re.compile(r"[ \t\r]*switch\s*\((.|\s)+?\)\s*\{")
 # return 表达式
 return_stat_regex = re.compile(r"return (.|\s)+?;")
 # function调用表达式
-function_call_regex = re.compile(r"(\w+::)?\w+\((.|\s)*?\);")
+function_call_regex = re.compile(r"\w+\(")
 # if表达式
 if_stat_regex = re.compile(r"if\s*\(")
+# if表达式1
+if_match_regex = re.compile(r"[ \t\r]*if\s*\(")
 # 赋值表达式
-assign_start_regex = re.compile(var_name_str + r"=")
+assign_start_regex = re.compile(var_name_str + r"\s*=")
+
 # 类成员函数表达式
-class_member_impl_begin_regex = re.compile(type_regex_str + r"\w+::\w+\(")
+class_member_impl_begin_regex = re.compile(type_regex_str + r"\w+::\w+\s*"+template_operator_symbol+"?\(")
+
 # delete 语句
 delete_stat_regex = re.compile(r"delete(\s|.)+?;")
 # stream 语句
@@ -95,6 +108,17 @@ param_regex = re.compile(r"\s*(?:const\s+)?((\w+::)?(\w+))(<[\w<>:\s\d,]+>)?(\s|
 emit_stat_regex = re.compile(r"emit\s+.+?;")
 # Q_PROPERTY
 qproperty_stat_regex = re.compile(r"Q_PROPERTY\((.| )+?\)")
+#泛型指针类型的正则表达式
+raw_pointer_in_generics_regex = re.compile(r"\w+<\s*\w+\s*\*\s*>")
+#C数组的正则表达式
+raw_array_regex = re.compile(r"\w+\s+\w+\[\d*\]")
+#C强制转换类型的正则表达式
+c_cast_regex = re.compile(r"(\s*|\()\(\s*[\w_]+\s*(\*)?\s*\)\s*[\w_]+")
+#memset,memcpy调用正则表达式
+memset_memcpy_regex = re.compile(r"[ \t\r]*(memset|memcpy)\(.+\)")
+#C++标准容器的正则表达式
+std_container_regex = re.compile(r"std::(?P<type_name>(string|vector|map|array))")
+
 # 错误信息
 # 类相关规则
 CLASS_NAME_MUST_CIT_BEGIN = r"类名称必须以cit开头"
@@ -114,10 +138,15 @@ STATIC_VAR_BEGIN_S = r"static变量以s_开头"
 GLOBAL_VAR_BEGIN_G = r"全局变量以g_开头"
 VAR_NAME_TOO_SHORT = r"变量名称太短"
 POINT_OR_REF_NEAR_TYPE = r"*或者&必须紧跟在变量类型后面"
+RAW_POINTER = r"指针建议使用QScoped_pointer或者QShared_pointer"
+RAW_ARRAY = r"数组使用QVector或者QVarLengthArray"
+C_STYLE_CAST = r"类型转换使用dynamic_cast,static_cast和reinterpret_cast"
+MEMSET_MEMCPY = r"memset,memcpy使用memset_s和memcpy_s"
+TOO_MANY_LINES = r"{0}语句建议不超过10行"
 SYSTEM_INCLUDE_AFTER_SELF_INCLUDE = r"include顺序错误，应该把系统库放到前面"
 QOBJECT_MUST_BE_END_WITH_CLASS = r"Q_OBJECT必须放在类的结尾"
 DESTROY_ADVISE_VIRTUAL = r"析构函数建议是virtual"
-
+OVER_LINES_NUM = 10         #while for if switch语句限制行数
 
 def remove_begin_space_and_newline(parser_string):
     """
@@ -181,12 +210,77 @@ def find_token_pair_by_pos(parser_string, start_pos, token):
 
     return -1
 
+def process_nested_region_linenum(parser_str, regtype, start_pos, end_pos):
+    region_str = parser_str[start_pos:end_pos+1]
+    start_pos_old = start_pos
+    start_pos = find_token_pair_by_pos(parser_str, parser_str.find("(",start_pos), "(")
+    str_11 = parser_str[start_pos_old:start_pos]
+    current_line  = parser_str.count("\n", 0, start_pos_old)+1
+    start_pos = next_line_break_pos(parser_str,start_pos)+1
+    error_message = []
+    line_num = 0
+    while start_pos < end_pos:
+        str = parser_str[start_pos:start_pos+20]
+        if_start_pos, if_end_pos = match_if_stat(parser_str, start_pos)
+        if if_start_pos != -1:
+            if_line_num, temp_list = process_nested_region_linenum(parser_str, "if", if_start_pos, if_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
+            line_num = line_num + 1
+            start_pos = next_line_break_pos(parser_str,if_end_pos) + 1
+            continue
+
+        for_start_pos, for_end_pos = match_for_stat(parser_str, start_pos)
+        if for_start_pos != -1:
+            for_line_num, temp_list = process_nested_region_linenum(parser_str, "for", for_start_pos, for_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
+            line_num = line_num + 1
+            start_pos = next_line_break_pos(parser_str, for_end_pos) + 1
+            continue
+
+        while_start_pos, while_end_pos = match_while_stat(parser_str, start_pos)
+        if while_start_pos != -1:
+            while_line_num, temp_list = process_nested_region_linenum(parser_str, "while", while_start_pos, while_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
+            line_num = line_num + 1
+            start_pos = next_line_break_pos(parser_str, while_end_pos) + 1
+            continue
+
+        switch_start_pos, switch_end_pos = match_switch_stat(parser_str, start_pos)
+        if switch_start_pos != -1:
+            switch_line_num, temp_list = process_nested_region_linenum(parser_str, "switch", switch_start_pos, switch_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
+            line_num = line_num + 1
+            start_pos = next_line_break_pos(parser_str, switch_end_pos) + 1
+            continue
+
+        start_pos = next_line_break_pos(parser_str,start_pos) + 1
+        line_num = line_num +1
+
+    if line_num > OVER_LINES_NUM:
+        temp_str = parser_str[start_pos_old:parser_str.find(")", start_pos_old)+1]
+        error_message.append(
+            ErrorReport(
+                line=parser_str.count("\n", 0, start_pos_old)+1,
+                message=TOO_MANY_LINES.format(regtype),
+                error_context=temp_str.strip()
+            )
+        )
+    return line_num, error_message
+
 
 def match_and_check_function_body(parser_string, start_pos):
     """
     返回函数解析出来的问题
-    :param parser_string
-    :param start_pos:
+    :param parser_string  解析的字符串
+    :param start_pos:     从start_pos处开始解析
     :return: function_body_begin_pos, function_body_end_pos, error_message
     """
 
@@ -194,75 +288,111 @@ def match_and_check_function_body(parser_string, start_pos):
     function_body_end_pos = find_token_pair_by_pos(parser_string, start_pos, "{")
     function_body_begin_pos = start_pos
     error_message = list()
-
-    logging.debug("begin match function body->")
+    function_line_begin = FileContext.current_line
+    logging.debug("开始匹配函数体->")
     while start_pos < function_body_end_pos:
         start_pos = next_token_pos_not_space(parser_string, start_pos+1)
-        FileContext.current_line += parser_string.count("\n", function_body_begin_pos, start_pos)
-        logging.debug("match->" + parser_string[start_pos:next_line_break_pos(parser_string, start_pos+1)])
+        FileContext.current_line = function_line_begin + parser_string.count("\n", function_body_begin_pos, start_pos)
+        logging.debug("开始匹配->" + parser_string[start_pos:next_line_break_pos(parser_string, start_pos+1)])
 
-        logging.debug("match if stat")
+        logging.debug("匹配if语句")
         if_start_pos, if_end_pos = match_if_stat(parser_string, start_pos)
         if if_start_pos != -1:
+            line_num, temp_list = process_nested_region_linenum(parser_string,"if", if_start_pos, if_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
             start_pos = if_end_pos+1
             continue
 
-        logging.debug("match del stat")
+        logging.debug("匹配delete语句")
         del_start_pos, del_end_pos = match_delete_stat(parser_string, start_pos)
         if del_start_pos != -1:
             start_pos = del_end_pos+1
             continue
 
-        logging.debug("match for stat")
+        logging.debug("匹配for语句")
         for_start_pos, for_end_pos = match_for_stat(parser_string, start_pos)
         if for_start_pos != -1:
+            line_num, temp_list = process_nested_region_linenum(parser_string,"for", for_start_pos, for_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
             start_pos = for_end_pos+1
             continue
 
-        logging.debug("match stream stat")
+        logging.debug("匹配foreach语句")
+        foreach_start_pos, foreach_end_pos = match_foreach_stat(parser_string, start_pos)
+        if foreach_start_pos != -1:
+            start_pos = foreach_end_pos+1
+            continue
+
+        logging.debug("匹配<< 和 >> 语句")
         stream_start_pos, stream_end_pos = match_stream_stat(parser_string, start_pos)
         if stream_start_pos != -1:
             start_pos = stream_end_pos+1
             continue
 
-        logging.debug("match while stat")
+        logging.debug("匹配while语句")
         while_start_pos, while_end_pos = match_while_stat(parser_string, start_pos)
         if while_start_pos != -1:
+            line_num, temp_list = process_nested_region_linenum(parser_string,"while", while_start_pos, while_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
             start_pos = while_end_pos+1
             continue
 
-        logging.debug("match do while stat")
+        logging.debug("匹配do...while语句")
         do_while_start_pos, do_while_end_pos = match_do_while_stat(parser_string, start_pos)
         if do_while_start_pos != -1:
             start_pos = do_while_end_pos+1
             continue
 
-        logging.debug("match emit")
+        logging.debug("匹配emit语句")
         emit_start_pos, emit_end_pos = match_stat(parser_string, start_pos, emit_stat_regex)
         if emit_start_pos != -1:
             start_pos = emit_end_pos+1
             continue
 
-        logging.debug("match switch stat")
-        match = switch_stat_regex.match(parser_string,start_pos)
-        if match:
-            start_pos = find_token_pair_by_pos(parser_string, match.end()-1, "{")+1
-            assert parser_string[start_pos-1] == "}"
+        logging.debug("匹配switch语句")
+        switch_start_pos, switch_end_pos = match_switch_stat(parser_string,start_pos)
+        if switch_start_pos != -1:
+            line_num, temp_list = process_nested_region_linenum(parser_string,"switch", switch_start_pos, switch_end_pos)
+            if temp_list is not None:
+                for er in temp_list:
+                    error_message.append(er)
+            start_pos = switch_end_pos+1
             continue
 
-        logging.debug("match function call")
+        logging.debug("匹配memset和memcpy")
+        mem_str, end__pos = check_memset_memcpy(parser_string, start_pos)
+        temp_str = parser_string[start_pos:end__pos]
+        if mem_str is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=mem_str,
+                    error_context=temp_str
+                )
+            )
+            if (start_pos < end__pos):
+                start_pos = end__pos + 1
+                continue
+
+        logging.debug("匹配函数调用语句")
         function_call_start_pos, function_call_end_pos = match_stat(parser_string, start_pos, function_call_regex)
         if function_call_start_pos != -1:
             start_pos = function_call_end_pos + 1
             continue
 
-        logging.debug("match return stat")
+        logging.debug("匹配return语句")
         match = return_stat_regex.match(parser_string, start_pos)  # return 语句略过不解析
         if match:
             start_pos = match.end()
             continue
 
-        logging.debug("match assign stat")
+        logging.debug("匹配=语句")
         match = assign_start_regex.match(parser_string, start_pos)
         if match:
             # 获取=号前面的语句，然后进行解析
@@ -289,11 +419,53 @@ def match_and_check_function_body(parser_string, start_pos):
                             error_context=var_str
                         )
                     )
+                raw_pointer = check_raw_pointer(var_str)
+                if raw_pointer is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=RAW_POINTER,
+                            error_context=var_str
+                        )
+                    )
+                raw_array, array_str = check_raw_array(parser_string, start_pos)
+                if raw_array is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=raw_array,
+                            error_context=array_str
+                        )
+                    )
+                std_string = check_std_container(var_str)
+                if std_string is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=std_string,
+                            error_context=var_str
+                        )
+                    )
 
             start_pos = parser_string.find(";", match.end())+1
             continue
 
-        logging.debug("match var stat")
+        logging.debug("匹配强制类型转换")
+        cast_str, end_pos = check_C_cast(parser_string,start_pos)
+        temp_str = parser_string[start_pos:end_pos]
+        if cast_str is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                            message=cast_str,
+                            error_context=temp_str
+                )
+            )
+            if (start_pos<end_pos):
+                start_pos = end_pos + 1
+                continue
+
+        logging.debug("匹配变量声明")
         match = var_regex.match(parser_string, start_pos)
         if match:
             end_token = parser_string.find(";", match.end())
@@ -308,17 +480,44 @@ def match_and_check_function_body(parser_string, start_pos):
                             error_context=var_str
                         )
                     )
+                raw_pointer = check_raw_pointer(var_str)
+                if raw_pointer is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=RAW_POINTER,
+                            error_context=var_str
+                        )
+                    )
+                raw_array, array_str = check_raw_array(parser_string, start_pos)
+                if raw_array is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=raw_array,
+                            error_context=array_str
+                        )
+                    )
+                std_string = check_std_container(var_str)
+                if std_string is not None:
+                    error_message.append(
+                        ErrorReport(
+                            line=FileContext.current_line,
+                            message=std_string,
+                            error_context=var_str
+                        )
+                    )
                 start_pos = end_token+1
                 continue
 
-        # 如果没有找到合适的结构的，则跳过
-        logging.debug("unknow stat, contine...")
+
+        logging.debug("位置的语句，跳过，直到下一个;之后")
         end = parser_string.find(";", start_pos)
         if end == -1:
             break
         start_pos = end+1
 
-    return start_pos, function_body_end_pos, error_message
+    return function_body_begin_pos, function_body_end_pos, error_message
 
 
 def check_scope_var(var_str):
@@ -333,13 +532,84 @@ def check_scope_var(var_str):
     if var_name[0:2] != "l_":
         return LOCAL_VAR_MUST_BE_L_BEGIN
 
+    var_declare = match.group()
+    pointer_pos = var_declare.find("*")
+    if pointer_pos != -1:
+        if var_declare[pointer_pos-1] == " ":
+            return POINT_OR_REF_NEAR_TYPE
+
     return None
 
+def check_raw_pointer(var_str):
+    """
+       检测原始指针
+       :param var_str:  变量的字符串
+       :return: error_message
+       """
+    match = var_regex.match(var_str)
+    assert  match is not None
+    container_match = raw_pointer_in_generics_regex.match(var_str)
+    if container_match is not None:
+        return None
+    pointer_pos = var_str.find("*", match.start(),match.end())
+    if pointer_pos != -1:
+        return RAW_POINTER
+    return None
+
+def check_raw_array(parser_str, start_pos):
+    """
+       检测C数组
+       :param parser_str: 输入字符串
+       :param start_pos:  解析位置
+       :return: error_message
+       """
+    array_match = raw_array_regex.match(parser_str, start_pos)
+    if array_match is not None:
+        array_str = parser_str[array_match.start():array_match.end()]
+        return RAW_ARRAY,array_str
+    return None,""
+
+def check_std_container(var_str):
+    """
+       检测C数组
+      :param var_str:  变量的字符串
+       :return: error_message
+       """
+    string_match = std_container_regex.search(var_str)
+    if string_match is not None:
+        temp_str = string_match.groupdict().get("type_name")
+        return "std::" + temp_str + "使用Q" + temp_str.capitalize()
+    return None
+
+def check_C_cast(parser_string,start_pos):
+    """
+        检测C强制转换
+      :param parser_str: 输入字符串
+       :return: error_message
+    """
+    endpos = parser_string.find("\n",start_pos)
+    cast_str = c_cast_regex.search(parser_string,start_pos,endpos)
+    if cast_str is not None:
+        return C_STYLE_CAST,endpos
+    return None, endpos
+
+def check_memset_memcpy(parser_str,start_pos):
+    """
+   检测C数组
+   :param parser_str: 输入字符串
+   :param start_pos:  解析位置
+   :return: error_message
+   """
+    endpos = parser_str.find(";", start_pos)
+    array_match = memset_memcpy_regex.match(parser_str, start_pos,endpos)
+    if array_match is not None:
+        return MEMSET_MEMCPY, array_match.end()+1
+    return None,endpos
 
 def check_class_member_var(var_str):
     """
     检测类成员变量
-    :param var: 变量的字符串
+    :param var_str: 变量的字符串
     :return: error_message
     """
     match = var_regex.match(var_str)
@@ -388,11 +658,13 @@ class FileContext:
 def check_params(parser_string, start_pos, end_pos):
     """
     检测函数参数的格式是否正确,返回error_message
-    :param parser_string:
-    :param start_pos:
-    :param end_pos:
+    :param parser_string: 解析的字符串
+    :param start_pos: 从start_pos开始结束
+    :param end_pos: 解析到end_pos位置
     :return: error_message, 如果有错误返回错误信息,否则为None
     """
+
+    # 传入的参数需要是在()范围之内的
     assert parser_string[start_pos] == "(" and parser_string[end_pos] == ")"
 
     while start_pos < end_pos:
@@ -427,9 +699,9 @@ class ErrorReport:
 
     def __str__(self):
         if self.error_context is not None:
-            return "%s(%d,0): < %s >======%s" % (self.file_full_path, self.line, self.error_context, self.message)
+            return "%s(%d): < %s >======%s" % (self.file_full_path, self.line, self.error_context, self.message)
         else:
-            return "%s(%d,0): %s" % (self.file_full_path, self.line, self.message)
+            return "%s(%d): %s" % (self.file_full_path, self.line, self.message)
 
 
 class TokenParser:
@@ -535,9 +807,9 @@ def next_token_pos_not_space(parser_string, start_pos):
 def next_token(parser_string, start_pos):
     """
     返回下一个token
-    :param parser_string:
-    :param start_pos:
-    :return: token
+    :param parser_string: 解析的字符串
+    :param start_pos: 从start_pos开始解析
+    :return: token 下一个token
     """
     token_parser = TokenParser(parser_string, start_pos)
     token_parser.next_token()
@@ -656,7 +928,6 @@ def match_and_check_function(parser_string, start_pos):
     if len(body_error):
         error_message.extend(body_error)
 
-
     return start_pos, body_end_pos, error_message
 
 
@@ -698,6 +969,36 @@ def match_and_check_class_var(parser_string, start_pos):
                 ErrorReport(
                     line=FileContext.current_line,
                     message=POINT_OR_REF_NEAR_TYPE,
+                    error_context=var_str
+                )
+            )
+            break
+        raw_pointer = check_raw_pointer(var_str)
+        if raw_pointer is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=RAW_POINTER,
+                    error_context=var_str
+                )
+            )
+            break
+        raw_array,array_str = check_raw_array(parser_string,start_pos)
+        if raw_array is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=raw_array,
+                    error_context=array_str
+                )
+            )
+            break
+        std_string = check_std_container(var_str)
+        if std_string is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=std_string,
                     error_context=var_str
                 )
             )
@@ -768,6 +1069,33 @@ def match_and_check_var(parser_string, start_pos):
                 )
             )
             break
+        raw_pointer = check_raw_pointer(var_str)
+        if raw_pointer is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=RAW_POINTER,
+                    error_context=var_str
+                )
+            )
+        raw_array, array_str = check_raw_array(parser_string, start_pos)
+        if raw_array is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=raw_array,
+                    error_context=array_str
+                )
+            )
+        std_string = check_std_container(var_str)
+        if std_string is not None:
+            error_message.append(
+                ErrorReport(
+                    line=FileContext.current_line,
+                    message=std_string,
+                    error_context=var_str
+                )
+            )
         break
 
     end_pos = parser_string.find(";", match.end())
@@ -869,11 +1197,55 @@ def match_friend_declare(parser_string, start_pos):
     return match.start(), end_pos
 
 
-def match_and_check_destroy(parser_string, start_pos):
+def match_and_check_construct_from_class_decl(parser_string, start_pos):
     """
-    检测析构函数是否符合语法
+    在类声明里面,从start_pos开始检测，是否符合构造函数语法，并且检测错误
     :param parser_string:
     :param start_pos:
+    :return: stat_start, stat_end, error_message 开始的位置，结束的位置, 检测的错误
+    """
+    error_message = []
+    match = construct_decl_begin_regex.match(parser_string, start_pos)
+    if match is None:
+        return -1, -1, error_message
+
+    # 查找函数参数的结束位置
+    param_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
+    param_error = check_params(parser_string, match.end()-1, param_end_pos)
+    if param_error is not None:
+        error_message.extend(param_error)
+
+    while True:
+        if next_token(parser_string, param_end_pos+1) == ";":
+            end_pos = parser_string.find(";", param_end_pos+1)
+            break
+
+        if next_token(parser_string, param_end_pos+1) == ":":
+            param_end_pos += 1
+            # 需要跳过继承类初始化
+
+        if next_token(parser_string, param_end_pos+1) == "{":
+            function_body_begin = parser_string.find("{", param_end_pos+1)
+            function_body_begin, function_end_pos, function_body_error = \
+                match_and_check_function_body(parser_string, function_body_begin)
+            error_message.extend(function_body_error)
+            if next_token(parser_string, param_end_pos+1) == ";":
+                end_pos = parser_string.find(";", function_end_pos)
+            else:
+                end_pos = function_end_pos
+            break
+
+        # Q_DECLARE_FLAGS(citArrowPos, ArrowPos)可能符合正则表达式，但是不符合构造函数的语法
+        return -1, -1, error_message
+
+    return match.start(), end_pos, error_message
+
+
+def match_and_check_destroy_from_class_decl(parser_string, start_pos):
+    """
+    在类声明里面，检测析构函数是否符合语法
+    :param parser_string: 解析的字符串
+    :param start_pos: 从start_pos处开始解析
     :return: stat_start, stat_end, error_message
     """
     error_message = list()
@@ -886,16 +1258,27 @@ def match_and_check_destroy(parser_string, start_pos):
         error_message.append(ErrorReport(line=FileContext.current_line,
                                          message=DESTROY_ADVISE_VIRTUAL,
                                          error_context=parser_string[match.start():match.end()]))
+    end_pos = match.end()
+    # 检测析构函数体
+    if next_token(parser_string, match.end()) == "{":
+        function_body_begin = parser_string.find("{", match.end())
+        function_body_begin, function_body_end, function_body_error_message = \
+            match_and_check_function_body(parser_string, function_body_begin)
+        error_message.extend(function_body_error_message)
+        end_pos = function_body_end
 
-    return match.start(), match.end(), error_message
+    if next_token(parser_string, end_pos) == ";":
+        end_pos = parser_string.find(";", end_pos)
+
+    return match.start(), end_pos, error_message
 
 
 def match_and_check_class_impl(parser_string, start_pos):
     """
-    检测函数实现
-    :param parser_string:
-    :param start_pos:
-    :return: stat_start, stat_end, error_message
+    检测类成员函数的实现
+    :param parser_string: 需要解析的字符串
+    :param start_pos: 从start_pos开始解析
+    :return: stat_start, stat_end, error_message 开始的位置，结束的位置，错误信息
     """
     error_message = list()
     while True:
@@ -976,29 +1359,34 @@ def match_and_check_class(parser_string, start_pos):
             if parser_string[class_start_pos] == ";":
                 class_start_pos += 1
                 continue
-            logging.debug("begin match:" + parser_string[class_start_pos:next_line_break_pos(parser_string, class_start_pos)])
+            logging.debug("开始匹配:" + parser_string[class_start_pos:next_line_break_pos(parser_string, class_start_pos)])
             FileContext.current_line = parser_string.count("\n", 0, class_start_pos)+1
 
+            # 开始匹配public等修饰符
             access_start, access_end = match_class_access(parser_string, class_start_pos)
             if access_start != -1:
                 class_start_pos = access_end + 1
                 continue
 
+            # 匹配友元函数声明
             friend_start, friend_end = match_friend_declare(parser_string, class_start_pos)
             if friend_start != -1:
                 class_start_pos = friend_end + 1
                 continue
 
+            # 匹配枚举
             enum_stat_start, enum_stat_end = match_stat(parser_string, class_start_pos, enum_stat_regex)
             if enum_stat_start != -1:
                 class_start_pos = enum_stat_end+1
                 continue
 
+            # 匹配q_property
             q_property_stat_start, q_property_stat_end = match_stat(parser_string, class_start_pos, qproperty_stat_regex)
             if q_property_stat_start != -1:
                 class_start_pos = q_property_stat_end+1
                 continue
 
+            # 匹配define
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
@@ -1006,6 +1394,7 @@ def match_and_check_class(parser_string, start_pos):
             if is_continue:
                 continue
 
+            # 匹配Q_OBJECT
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
@@ -1013,13 +1402,23 @@ def match_and_check_class(parser_string, start_pos):
             if is_continue:
                 continue
 
+            # 匹配析构函数
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
-                                                                  match_and_check_destroy)
+                                                                  match_and_check_destroy_from_class_decl)
             if is_continue:
                 continue
 
+            # 匹配构造函数
+            class_start_pos, is_continue = helper_match_and_check(error_message,
+                                                                  parser_string,
+                                                                  class_start_pos,
+                                                                  match_and_check_construct_from_class_decl)
+            if is_continue:
+                continue
+
+            # 匹配函数声明
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
@@ -1027,6 +1426,7 @@ def match_and_check_class(parser_string, start_pos):
             if is_continue:
                 continue
 
+            # 匹配typedef语句
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
@@ -1034,6 +1434,7 @@ def match_and_check_class(parser_string, start_pos):
             if is_continue:
                 continue
 
+            # 匹配类成员变量声明
             class_start_pos, is_continue = helper_match_and_check(error_message,
                                                                   parser_string,
                                                                   class_start_pos,
@@ -1101,6 +1502,8 @@ def match_and_check_define(parser_string, start_pos):
                         )
                     )
                     break
+            elif c == "(":
+                break
         break
 
     start_pos = match.end()
@@ -1193,7 +1596,7 @@ def match_while_stat(parser_string, start_pos):
     :param start_pos: 开始的位置,
     :return: stat_start, stat_end, 如果没有匹配，则都返回-1
     """
-    match = while_stat_regex.match(parser_string, start_pos)
+    match = while_match_regex.match(parser_string, start_pos)
     if match is None:
         return -1, -1
 
@@ -1205,6 +1608,26 @@ def match_while_stat(parser_string, start_pos):
         end_while_pos = parser_string.find(";", match.end())
 
     return match.start(), end_while_pos
+
+def match_switch_stat(parser_string, start_pos):
+    """
+    从start_pos开始检测,是否符合switch语句的语法，如果符合，则返回整个switch语句的作用域(指的是{}这个里面，或者switch语句的下一句)
+    :param parser_string: 需要解析的语句
+    :param start_pos: 开始的位置,
+    :return: stat_start, stat_end, 如果没有匹配，则都返回-1
+    """
+    match = switch_match_regex.match(parser_string, start_pos)
+    if match is None:
+        return -1, -1
+
+    token_parser = TokenParser(parser_string, match.end()-1)
+    token_parser.next_token()
+    if token_parser.current_token() == "{":
+        end_switch_pos = find_token_pair_by_pos(parser_string, token_parser.current_token_end_pos()-1, "{")
+    else:
+        end_switch_pos = parser_string.find(";", match.end())
+
+    return match.start(), end_switch_pos
 
 
 def match_prec_stat(parser_string, start_pos):
@@ -1266,6 +1689,24 @@ def match_do_while_stat(parser_string, start_pos):
     return match.start(), do_while_end_pos
 
 
+def match_foreach_stat(parser_string, start_pos):
+    """
+    从start_pos开始检测,是否符合for语句的语法，如果符合，则返回整个for语句的作用域(指的是{}这个里面，或者if语句的下一句)
+    :param parser_string: 需要解析的语句
+    :param start_pos: 开始的位置,
+    :return: stat_start, stat_end, 如果没有匹配，则都返回-1
+    """
+    match = foreach_stat_regex.match(parser_string, start_pos)
+    if match is None:
+        return -1, -1
+
+    for_each_end_pos = find_token_pair_by_pos(parser_string, match.end()-1, "(")
+    foreach_body_begin_pos = parser_string.find("{", for_each_end_pos+1)
+    body_end_pos = find_token_pair_by_pos(parser_string, foreach_body_begin_pos, "{")
+    return start_pos, body_end_pos
+
+
+
 def match_for_stat(parser_string, start_pos):
     """
     从start_pos开始检测,是否符合for语句的语法，如果符合，则返回整个for语句的作用域(指的是{}这个里面，或者if语句的下一句)
@@ -1273,7 +1714,7 @@ def match_for_stat(parser_string, start_pos):
     :param start_pos: 开始的位置,
     :return: stat_start, stat_end, 如果没有匹配，则都返回-1
     """
-    match = for_stat_regex.match(parser_string, start_pos)
+    match = for_match_regex.match(parser_string, start_pos)
     if match is None:
         return -1, -1
 
@@ -1296,7 +1737,7 @@ def match_if_stat(parser_string, start_pos):
     :param start_pos: 开始的位置,
     :return: stat_start, stat_end, 如果没有匹配，则都返回-1
     """
-    match = if_stat_regex.match(parser_string, start_pos)
+    match = if_match_regex.match(parser_string, start_pos)
     if match is None:
         return -1, -1
 
@@ -1387,7 +1828,7 @@ def match_and_check(parser_string, start_pos):
         logging.debug("---------------------------------------")
         start_pos = next_token_pos_not_space(parser_string, start_pos)
         message_end = next_line_break_pos(parser_string, start_pos)
-        logging.debug("match begin:" + parser_string[start_pos:message_end] )
+        logging.debug("开始匹配:" + parser_string[start_pos:message_end] )
         if start_pos == -1:
             break
         assert start_pos > old_pos
@@ -1398,100 +1839,118 @@ def match_and_check(parser_string, start_pos):
         if start_pos == -1:
             break
 
-        logging.debug("begin match define")
+        logging.debug("开始匹配#define")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_define)
         if is_continue:
+            logging.debug("处理#define")
             continue
 
-        logging.debug("begin match enum")
+        logging.debug("开始匹配枚举")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_enum)
         if is_continue:
+            logging.debug("处理枚举")
             continue
 
-        logging.debug("begin match include")
+        logging.debug("开始匹配#include语句")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_include)
         if is_continue:
+            logging.debug("处理#include")
             continue
 
-        logging.debug("begin match typedef")
+        logging.debug("开始匹配typedef")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_typedef)
         if is_continue:
+            logging.debug("处理typedef")
             continue
 
-        logging.debug("begin match class")
+        logging.debug("匹配class")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_class)
         if is_continue:
+            logging.debug("处理class完毕")
             continue
 
-        logging.debug("begin match class_impl")
+        logging.debug("匹配函数实现")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_class_impl)
 
         if is_continue:
+            logging.debug("处理函数实现完毕")
             continue
 
         # 预处理的语句直接跳到下一行去，不进行处理
         prec_start_pos, prec_end_pos = match_prec_stat(parser_string, start_pos)
         if prec_start_pos != -1:
             start_pos = prec_end_pos+1
-            logging.debug("step precompile stat:" + parser_string[prec_start_pos:prec_end_pos+1])
+            logging.debug("处理预处理语句:" + parser_string[prec_start_pos:prec_end_pos+1])
             continue
 
-        logging.debug("begin match cit begin enum")
+        logging.debug("匹配CIT_BEGIN_ENUM")
         # cit begin enum 直接跳到尾部
         cit_begin_enum_start_pos, cit_end_enum_end_pos = match_stat(parser_string, start_pos, cit_begin_enum_regex)
         if cit_begin_enum_start_pos != -1:
             start_pos = cit_end_enum_end_pos+1
-            logging.debug("step cit enum stat:" + parser_string[cit_begin_enum_start_pos:cit_end_enum_end_pos])
+            logging.debug("处理CIT_BEGIN_ENUM" + parser_string[cit_begin_enum_start_pos:cit_end_enum_end_pos])
             continue
 
         # using namespace 直接跳过
+        logging.debug("开始匹配using namespace")
         using_start_pos, using_end_pos = match_using_namespace(parser_string, start_pos)
         if using_start_pos != -1:
             start_pos = using_end_pos+1
-            logging.debug("step using namespace:" + parser_string[using_start_pos:using_end_pos])
+            logging.debug("处理namespace" + parser_string[using_start_pos:using_end_pos])
             continue
 
-        logging.debug("begin match struct")
+        logging.debug("开始匹配struct")
         struct_start_pos, struct_end_pos = match_struct(parser_string, start_pos)
         if struct_start_pos != -1:
-            logging.debug("step struct;")
+            logging.debug("处理struct语句")
             start_pos = struct_end_pos+1
             continue
 
-        logging.debug("begin match static init")
+        logging.debug("匹配静态成员变量初始化")
         static_init_start_pos, static_init_end_pos = match_static_init(parser_string, start_pos)
         if static_init_start_pos != -1:
-            logging.debug("step static ini")
+            logging.debug("处理静态成员变量初始化")
             start_pos = static_init_end_pos+1
             continue
 
-        logging.debug("begin match function")
+        '''
+        # 匹配宏定义的函数调用
+        logging.debug("匹配宏定义函数调用")
+        macro_call_start_pos, marco_call_end_pos = match_marco_call(parser_string, start_pos)
+        if macro_call_start_pos != -1:
+            logging.debug("处理宏定义函数调用")
+            start_pos = macro_call_start_pos + 1
+            continue
+        '''
+
+        logging.debug("匹配普通函数")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
                                                         match_and_check_function)
         if is_continue:
+            logging.debug("处理普通函数结束")
             continue
 
-        logging.debug("begin match var")
+        logging.debug("开始匹配变量")
         start_pos, is_continue = helper_match_and_check(all_error_message,
                                                         parser_string,
                                                         start_pos,
@@ -1499,11 +1958,12 @@ def match_and_check(parser_string, start_pos):
         if is_continue:
             continue
 
-        logging.debug("unknow stat, continue next line:")
+        old_start_pos = start_pos
         start_pos = next_line_break_pos(parser_string, start_pos)
         if len(parser_string) <= start_pos:
             break
 
+        logging.debug("未知的代码，开始下一行匹配:" + parser_string[old_start_pos:start_pos])
     return all_error_message
 
 
@@ -1532,6 +1992,14 @@ def remove_comment(parser_string):
     :param parser_string: 需要处理的文本
     :return:  删除注释完毕后的文本
     """
+    while True:
+        search = one_line_comment_regex.search(parser_string)
+        if search is None:
+            break
+
+        comment_begin_pos = search.start(0)
+        comment_end_pos = search.end(0)
+        parser_string = parser_string[0:comment_begin_pos] + parser_string[comment_end_pos:]
 
     # 删除多行的时候,会在中间插入对应行数的换行,方便统计准备行数
     while True:
@@ -1548,14 +2016,6 @@ def remove_comment(parser_string):
 
         parser_string = parser_string[0:comment_begin_pos] + replace_str + parser_string[comment_end_pos:]
 
-    while True:
-        search = one_line_comment_regex.search(parser_string)
-        if search is None:
-            break
-
-        comment_begin_pos = search.start(0)
-        comment_end_pos = search.end(0)
-        parser_string = parser_string[0:comment_begin_pos] + parser_string[comment_end_pos:]
     return parser_string
 
 
@@ -1607,7 +2067,7 @@ def read_file_data(file_path):
     :param file_path: 文件的路径
     :return:  返回去掉不需要的关键字后的数据
     """
-    with open(file_path, mode="r", encoding="gb2312") as fp:
+    with open(file_path, mode="r") as fp:
         fp.seek(0, 2)
         length = fp.tell()
         fp.seek(0, 0)
@@ -1632,6 +2092,8 @@ def check_file(file_path):
             rule.file_full_path = os.path.abspath(file_path)
 
         return match_and_check_result
+    except UnicodeDecodeError:
+        logging.error("源文件编码错误，请查看是否GB2312编码")
     finally:
         FileContext.include_system_end = False
 
